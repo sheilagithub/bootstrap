@@ -22,9 +22,11 @@
 #   5. Claude Code            the agent harness (native installer)
 #   6. apm + ~/.apm/apm.yml    layer 2: agent primitives via agent-packages,
 #                             including Claude's statusline
-#   7. dotfiles/sync.sh        audit, the same path the daily job takes
-#   8. end-state check
-#   9. dotfiles/scripts/reload.sh --apply: reload what was running on old state
+#   7. project apm packages   apm install --frozen + worktree hook, per repo
+#                             with an apm.yml
+#   8. dotfiles/sync.sh        audit, the same path the daily job takes
+#   9. end-state check
+#  10. dotfiles/scripts/reload.sh --apply: reload what was running on old state
 #
 # This lives OUTSIDE dotfiles on purpose: dotfiles must never write the agent
 # layer (~/.apm, ~/.claude), and step 6 does. It stays public so a machine
@@ -223,6 +225,48 @@ else
     (cd "$HOME/.apm" && apm install --global) || warn "apm install --global failed (above)"
 fi
 
+# Project scope: every cloned repo with an apm.yml gets its own packages,
+# and its worktree hook if it ships one, so new worktrees install theirs too.
+# --frozen when a lockfile exists: reproduce what the repo pinned.
+step "Project apm packages"
+for r in $REPOS; do
+    dest="$SRC_DIR/$r"
+    [ -f "$dest/apm.yml" ] || continue
+    enable="$dest/dev/tools/enable_worktree_apm_bootstrap.sh"
+    if [ -x "$dest/.githooks/post-checkout" ] && [ -f "$enable" ]; then
+        if [ -n "$(git -C "$dest" config core.hooksPath)" ]; then
+            ok "$r worktree hook enabled"
+        elif (cd "$dest" && bash "$enable" >/dev/null); then
+            act "$r: enabled worktree apm hook"
+        else
+            warn "$r: could not enable its worktree hook (see above)"
+        fi
+    fi
+    # Install ONCE, when nothing is installed yet. apm 0.31 can re-resolve a
+    # semver range on a repeat install even under --frozen, rewriting the
+    # tracked lockfile (agent-packages E-21); a first install was clean every
+    # time it was observed. Later updates belong to the repo's own workflow.
+    if ! grep -q 'No APM dependencies installed' <<<"$(cd "$dest" && apm deps list 2>&1)"; then
+        ok "$r packages already installed (not re-run; see E-21)"
+        continue
+    fi
+    lock_clean=0
+    git -C "$dest" diff --quiet -- apm.lock.yaml 2>/dev/null && lock_clean=1
+    if [ -f "$dest/apm.lock.yaml" ]; then
+        (cd "$dest" && apm install --frozen >/dev/null 2>&1) && act "$r: installed packages (frozen)" ||
+            warn "$r: apm install --frozen failed; run it in $dest to see why"
+    else
+        (cd "$dest" && apm install >/dev/null 2>&1) && act "$r: installed packages" ||
+            warn "$r: apm install failed; run it in $dest to see why"
+    fi
+    # Never leave a tracked lockfile rewritten behind: put it back and say so.
+    # Only when it was clean before -- uncommitted edits of yours stay.
+    if [ "$lock_clean" = 1 ] && ! git -C "$dest" diff --quiet -- apm.lock.yaml 2>/dev/null; then
+        git -C "$dest" checkout -- apm.lock.yaml
+        warn "$r: apm rewrote apm.lock.yaml during install (E-21); restored it. Deployed files may not match the lock: run 'apm audit' in $dest"
+    fi
+done
+
 if [ "${SKIP_SYNC:-0}" != 1 ]; then
     step "dotfiles sync.sh (audit)"
     SKIP_PULL=1 "$DOTFILES/sync.sh" || warn "sync reported failures; see $DOTFILES/logs/"
@@ -275,6 +319,10 @@ check "herdr agent integration for Claude" "grep -q '^claude: current' <<<\"\$(h
 check "Claude Code" "command -v claude" "curl -fsSL https://claude.ai/install.sh | bash"
 check "Claude statusline" "statusline_ok" "cd ~/.apm && apm update --global --yes"
 check "MCP servers match the roster" "python3 \"\$(find $HOME/.apm/apm_modules -path '*/user/scripts/verify_host_mcp.py' | head -n1)\"" "cd $AGENT_PACKAGES && make verify-host"
+for r in $REPOS; do
+    [ -f "$SRC_DIR/$r/apm.yml" ] || continue
+    check "$r apm packages installed" "! grep -q 'No APM dependencies installed' <<<\"\$(cd $SRC_DIR/$r && apm deps list 2>&1)\"" "cd $SRC_DIR/$r && apm install --frozen"
+done
 check "login shell is zsh" "grep -q zsh <<<\"\$(dscl . -read /Users/\$(id -un) UserShell)\"" "chsh -s /bin/zsh"
 
 if [ "$missing" -gt 0 ]; then
