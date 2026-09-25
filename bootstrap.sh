@@ -33,7 +33,7 @@
 #   SRC_DIR=~/src            where repos are cloned
 #   PROFILE=desktop          dotfiles profile (desktop | server)
 #   EXTRA_REPOS="a b"        more sheilagithub repos to clone alongside
-#   SKIP_SYNC=1              stop after the global apm install
+#   SKIP_SYNC=1              skip dotfiles/sync.sh; the end-state check still runs
 
 # Everything lives in main(), called on the last line, so a truncated download
 # runs nothing instead of half a script.
@@ -233,6 +233,26 @@ fi
 # session needs; a miss names what to fix.
 step "End state"
 missing=0
+# A statusLine that exists is not enough: it must be a command entry with a
+# non-empty command, and any path in that command must exist.
+statusline_ok() {
+    python3 - "$HOME/.claude/settings.json" <<'PYEOF'
+import json, os, shlex, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        line = json.load(f).get("statusLine")
+except (OSError, ValueError):
+    sys.exit(1)
+if not isinstance(line, dict) or line.get("type") != "command":
+    sys.exit(1)
+command = line.get("command")
+if not isinstance(command, str) or not command.strip():
+    sys.exit(1)
+paths = [os.path.expanduser(t) for t in shlex.split(command) if "/" in t]
+sys.exit(0 if all(os.path.exists(p) for p in paths) else 1)
+PYEOF
+}
+
 # Each probe runs through eval, so it can be a small pipeline. Pipes into
 # `grep -q` are avoided: under pipefail, grep exiting on its first match can
 # SIGPIPE the producer and turn a hit into a failure.
@@ -246,13 +266,13 @@ check() {
 }
 check "WezTerm app" "[ -d /Applications/WezTerm.app ]" "brew install --cask wezterm"
 check "JetBrainsMono Nerd Font" "ls $HOME/Library/Fonts/JetBrainsMonoNerdFont* || ls /Library/Fonts/JetBrainsMonoNerdFont*" "brew install --cask font-jetbrains-mono-nerd-font"
-check "~/.wezterm.lua from dotfiles" "[ -L $HOME/.wezterm.lua ]" "$DOTFILES/install.sh $PROFILE"
+check "~/.wezterm.lua from dotfiles" "[ -L $HOME/.wezterm.lua ] && [ -e $HOME/.wezterm.lua ]" "$DOTFILES/install.sh $PROFILE"
 check "herdr" "command -v herdr" "$DOTFILES/install.sh $PROFILE"
-check "herdr config from dotfiles" "[ -L $HOME/.config/herdr/config.toml ]" "$DOTFILES/install.sh $PROFILE"
+check "herdr config from dotfiles" "[ -L $HOME/.config/herdr/config.toml ] && [ -e $HOME/.config/herdr/config.toml ]" "$DOTFILES/install.sh $PROFILE"
 check "herdr plugins (worktree-layout, file-viewer)" "plugins=\$(herdr plugin list); grep -q sheilagithub.worktree-layout <<<\"\$plugins\" && grep -q herdr-file-viewer <<<\"\$plugins\"" "$DOTFILES/install.sh $PROFILE"
 check "herdr agent integration for Claude" "grep -q '^claude: current' <<<\"\$(herdr integration status)\"" "cd ~/.apm && apm install --global"
 check "Claude Code" "command -v claude" "curl -fsSL https://claude.ai/install.sh | bash"
-check "Claude statusline" "python3 -c 'import json,sys; sys.exit(0 if \"statusLine\" in json.load(open(\"$HOME/.claude/settings.json\")) else 1)'" "cd ~/.apm && apm update --global --yes"
+check "Claude statusline" "statusline_ok" "cd ~/.apm && apm update --global --yes"
 check "MCP servers match the roster" "python3 \"\$(find $HOME/.apm/apm_modules -path '*/user/scripts/verify_host_mcp.py' | head -n1)\"" "cd $AGENT_PACKAGES && make verify-host"
 check "login shell is zsh" "grep -q zsh <<<\"\$(dscl . -read /Users/\$(id -un) UserShell)\"" "chsh -s /bin/zsh"
 
