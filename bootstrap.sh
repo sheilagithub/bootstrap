@@ -24,6 +24,7 @@
 #                             including Claude's statusline
 #   7. dotfiles/sync.sh        audit, the same path the daily job takes
 #   8. end-state check
+#   9. dotfiles/scripts/reload.sh --apply: reload what was running on old state
 #
 # This lives OUTSIDE dotfiles on purpose: dotfiles must never write the agent
 # layer (~/.apm, ~/.claude), and step 6 does. It stays public so a machine
@@ -281,34 +282,20 @@ if [ "$missing" -gt 0 ]; then
     exit 1
 fi
 
-# Programs already running keep what they loaded at start: a new font, PATH,
-# herdr plugin or MCP server reaches nothing until the program restarts. So
-# the run ends with the reload steps, marking the ones this machine needs now.
-# Match executable names (ps comm), never full command lines: run as
-# `bash -c "$(curl ...)"`, this script's own command line contains every
-# pattern below. herdr's server is asked directly.
-running() {
-    case "$1" in
-        herdr-server) [ "$(herdr status server 2>/dev/null | sed -n 's/^status: //p')" = running ] ;;
-        # Captured first: under pipefail, `ps | grep -q` fails when grep's
-        # early exit SIGPIPEs ps -- on exactly the runs where it matched.
-        *) procs=$(ps -Ao comm=); grep -Eq "(^|/)$1\$" <<<"$procs" ;;
-    esac
-}
-now() { if running "$1"; then printf '  \033[33m<- running now\033[0m'; fi; }
-printf '\n   \033[32mReady.\033[0m Reload what was already running, then use it:\n\n'
-printf '   1. WezTerm: quit fully (Cmd+Q) and reopen from the Dock. A running WezTerm\n'
-printf '      does not pick up newly installed fonts.%b\n' "$(now wezterm-gui)"
-printf '   2. Shell: open a new tab or window (or: exec zsh -l) for .zshrc, brew and\n'
-printf '      ~/.local/bin on PATH.\n'
-printf '   3. herdr: `herdr server reload-config` after config changes; after a herdr,\n'
-printf '      plugin or integration install, `herdr server stop` then `herdr` (the\n'
-printf '      session is restored).%b\n' "$(now herdr-server)"
-printf '   4. Claude: restart running `claude` sessions for new MCP servers, skills\n'
-printf '      and the statusline. A first run asks you to log in.%b\n' "$(now claude)"
+# Programs already running keep what they loaded at start: WezTerm its fonts,
+# a shell its PATH, herdr its plugins, claude its MCP servers. dotfiles'
+# reload script finds each one that started before a change it depends on,
+# runs the reloads that are safe from here, and prints the rest.
+step "Reload"
+if [ -x "$DOTFILES/scripts/reload.sh" ]; then
+    "$DOTFILES/scripts/reload.sh" --apply
+else
+    warn "dotfiles has no scripts/reload.sh yet: restart WezTerm, herdr (herdr server stop && herdr) and open shells by hand"
+fi
 cat <<EOF
 
-   Then: WezTerm -> \`herdr\` -> \`claude\` in a pane.
+   Ready. Then: WezTerm -> \`herdr\` -> \`claude\` in a pane (a first run asks
+   you to log in). Re-check reloads any time: dot reload
 
    Repos:     $SRC_DIR
    Optional:  cd $DOTFILES && just schedule    daily sync at 08:30 via launchd
